@@ -1,12 +1,12 @@
-"""
-streamlit_app.py — Face Recognizer running in the browser via Streamlit
-Run locally:  streamlit run streamlit_app.py
+ """
+streamlit_app.py — Face Recognizer (lightweight, Streamlit Cloud compatible)
+Uses HOG + LBP features — no dlib, no tensorflow, no cmake needed.
+Run: streamlit run streamlit_app.py
 """
 
 import os
 import pickle
 import time
-import threading
 
 import cv2
 import numpy as np
@@ -26,27 +26,27 @@ os.makedirs(DATA_DIR, exist_ok=True)
 RECORD_SECONDS = 180
 FRAME_SAMPLE   = 5
 
-# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Face Recognizer", page_icon="🎭", layout="centered")
 st.title("🎭 Face Recognizer")
 
 # ── Session state ──────────────────────────────────────────────────────────────
-if "embedder"    not in st.session_state: st.session_state.embedder    = None
-if "classifier"  not in st.session_state: st.session_state.classifier  = None
-if "label_names" not in st.session_state: st.session_state.label_names = []
-if "log"         not in st.session_state: st.session_state.log         = []
+if "embedder"    not in st.session_state:
+    st.session_state.embedder    = get_embedder()   # lightweight, instant
+if "classifier"  not in st.session_state:
+    st.session_state.classifier  = None
+if "label_names" not in st.session_state:
+    st.session_state.label_names = []
 
-# ── Load classifier if saved ───────────────────────────────────────────────────
+# ── Load saved classifier ──────────────────────────────────────────────────────
 def load_classifier():
     if os.path.exists(MODEL_PATH):
         with open(MODEL_PATH, "rb") as f:
             data = pickle.load(f)
         st.session_state.classifier  = data["clf"]
         st.session_state.label_names = data["labels"]
-        return True
-    return False
 
 def save_classifier(clf, labels):
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     with open(MODEL_PATH, "wb") as f:
         pickle.dump({"clf": clf, "labels": labels}, f)
     st.session_state.classifier  = clf
@@ -55,13 +55,7 @@ def save_classifier(clf, labels):
 if st.session_state.classifier is None:
     load_classifier()
 
-# ── Load embedder once ─────────────────────────────────────────────────────────
-def ensure_embedder():
-    if st.session_state.embedder is None:
-        with st.spinner("Loading face model (first run ~30s) …"):
-            st.session_state.embedder = get_embedder()
-
-# ── Sidebar: known persons ─────────────────────────────────────────────────────
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Known persons")
     persons = [d for d in os.listdir(DATA_DIR)
@@ -71,26 +65,22 @@ with st.sidebar:
             st.markdown(f"✅ {p.replace('_', ' ')}")
     else:
         st.info("No persons added yet.")
-
     st.divider()
-    st.caption("Add ≥ 2 persons before running recognition.")
+    st.caption("Add ≥ 2 persons before recognition.")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Add Person
-# TAB 2 — Live Recognition
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2 = st.tabs(["➕ Add Person", "▶ Live Recognition"])
 
-# ────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Add Person
-# ────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.subheader("Record a 3-minute video to register a new person")
+    st.subheader("Register a new person from webcam video")
 
     name_input = st.text_input("Person's name", placeholder="e.g. Alice")
 
     col1, col2 = st.columns(2)
-    record_duration = col1.slider("Recording duration (seconds)", 30, 180, 180, 10)
+    record_duration = col1.slider("Recording duration (seconds)", 30, 180, 60, 10)
     frame_skip      = col2.slider("Sample every N frames", 1, 10, 5)
 
     start_btn = st.button("🎥 Start Recording", use_container_width=True,
@@ -102,7 +92,6 @@ with tab1:
 
     if start_btn and name_input.strip():
         name = name_input.strip().replace(" ", "_")
-        ensure_embedder()
 
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -112,7 +101,7 @@ with tab1:
 
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            st.error("Cannot open webcam. Make sure no other app is using it.")
+            st.error("❌ Cannot open webcam. Make sure no other app is using it.")
             st.stop()
 
         embeddings = []
@@ -133,7 +122,6 @@ with tab1:
 
             frame_idx += 1
 
-            # Live preview (every frame)
             rgb_preview = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             cam_placeholder.image(rgb_preview, channels="RGB",
                                   caption=f"Recording… {int(record_duration - elapsed)}s left",
@@ -159,53 +147,49 @@ with tab1:
 
             status_box.info(
                 f"Recording '{name}' — {int(record_duration - elapsed)}s left | "
-                f"embeddings collected: {saved}")
+                f"embeddings: {saved}")
 
         cap.release()
         cam_placeholder.empty()
         prog_placeholder.empty()
 
         if not embeddings:
-            status_box.error("No faces detected! Try better lighting and face the camera directly.")
+            status_box.error("No faces detected! Try better lighting.")
         else:
             emb_path = os.path.join(person_dir, "embeddings.pkl")
             with open(emb_path, "wb") as f:
                 pickle.dump(np.array(embeddings), f)
 
-            status_box.success(f"Saved {len(embeddings)} embeddings for '{name}'. Training classifier …")
+            status_box.success(f"Saved {len(embeddings)} embeddings for '{name}'. Training …")
 
             clf, labels = train_classifier(DATA_DIR)
             if clf is not None:
                 save_classifier(clf, labels)
                 status_box.success(
-                    f"✅ Done! Classifier trained on {len(labels)} person(s). "
-                    f"Switch to the **Live Recognition** tab.")
+                    f"✅ Done! Classifier ready for {len(labels)} person(s). "
+                    "Switch to **Live Recognition** tab.")
             else:
-                status_box.warning(
-                    "Need at least 2 people to train the classifier. Add another person!")
+                status_box.warning("Add at least 2 persons to train the classifier.")
             st.rerun()
 
-# ────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Live Recognition
-# ────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.subheader("Live face recognition")
 
     if st.session_state.classifier is None:
         st.warning("No classifier trained yet. Add at least 2 persons first.")
     else:
-        st.success(f"Classifier ready — knows: "
-                   f"{', '.join(st.session_state.label_names)}")
+        st.success(f"Ready — knows: {', '.join(st.session_state.label_names)}")
 
-        threshold = st.slider("Confidence threshold", 0.20, 0.90, 0.45, 0.05,
-                              help="Faces below this confidence are labelled 'Unknown'")
+        threshold = st.slider("Confidence threshold", 0.20, 0.90, 0.55, 0.05,
+                              help="Faces below this score are labelled Unknown")
 
-        run_recog = st.toggle("Run live recognition", value=False)
+        run_recog  = st.toggle("Run live recognition", value=False)
         live_frame = st.empty()
-        info_box   = st.empty()
 
         if run_recog:
-            ensure_embedder()
             face_cascade = cv2.CascadeClassifier(
                 cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
@@ -214,7 +198,7 @@ with tab2:
                 st.error("Cannot open webcam.")
                 st.stop()
 
-            info_box.info("Recognition running — toggle off to stop.")
+            st.info("Recognition running — toggle off to stop.")
 
             while run_recog:
                 ret, frame = cap.read()
@@ -239,12 +223,10 @@ with tab2:
 
                     color = (0, 200, 0) if pred_name != "Unknown" else (0, 0, 220)
                     cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-                    label = f"{pred_name} ({conf:.0%})"
-                    cv2.putText(frame, label, (x, y - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+                    cv2.putText(frame, f"{pred_name} ({conf:.0%})",
+                                (x, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
 
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 live_frame.image(rgb, channels="RGB", use_container_width=True)
 
             cap.release()
-            info_box.info("Recognition stopped.")
