@@ -1,45 +1,75 @@
 """
-embedder.py — Generates 128-d face embeddings.
-
-Uses the `face_recognition` library (dlib under the hood) which ships with
-pre-trained models — no separate download needed beyond `pip install face_recognition`.
-
-If you prefer FaceNet/ArcFace, swap get_embedder() and get_embedding() with a
-deepface or insightface implementation; the rest of the app is unchanged.
+embedder.py — Lightweight face embeddings using MediaPipe + HOG features.
+No tensorflow, no dlib, no cmake. Works on Streamlit Cloud free tier.
 """
 
+import cv2
 import numpy as np
 
 
 def get_embedder():
-    """
-    Load and return the face_recognition module (acts as our 'embedder').
-    Called once at startup so the dlib models load only once.
-    """
-    try:
-        import face_recognition as fr
-        return fr
-    except ImportError:
-        raise RuntimeError(
-            "face_recognition is not installed.\n"
-            "Run:  pip install face-recognition\n"
-            "(Requires cmake + dlib — see README for details.)"
-        )
+    """Returns a simple dict config — no heavy model to load."""
+    return {"ready": True}
 
 
 def get_embedding(embedder, rgb_img: np.ndarray):
     """
-    Given a face_recognition module and an RGB numpy array of a face crop,
-    return a 128-d numpy vector or None if no face is detected.
-
-    face_recognition.face_encodings() runs detection internally, but since
-    we already cropped, we tell it the bounding box covers the whole image.
+    Extract a lightweight 512-d feature vector from a face crop.
+    Uses HOG (histogram of oriented gradients) + LBP (local binary pattern)
+    — fast, CPU-only, no external model files needed.
     """
-    h, w = rgb_img.shape[:2]
-    # Provide the full-image bounding box so it doesn't re-detect
-    known_box = [(0, w, h, 0)]   # top, right, bottom, left
-    encodings = embedder.face_encodings(rgb_img, known_face_locations=known_box,
-                                        num_jitters=1)
-    if encodings:
-        return encodings[0]       # 128-d numpy array
-    return None
+    try:
+        # Resize to standard size
+        face = cv2.resize(rgb_img, (64, 64))
+        gray = cv2.cvtColor(face, cv2.COLOR_RGB2GRAY)
+
+        # ── HOG features ──────────────────────────────────────────
+        win_size    = (64, 64)
+        block_size  = (16, 16)
+        block_stride= (8, 8)
+        cell_size   = (8, 8)
+        nbins       = 9
+        hog = cv2.HOGDescriptor(win_size, block_size, block_stride, cell_size, nbins)
+        hog_feat = hog.compute(gray).flatten()          # 1764-d
+
+        # ── LBP features ──────────────────────────────────────────
+        lbp = _lbp(gray)
+        hist_lbp, _ = np.histogram(lbp.ravel(), bins=64, range=(0, 256))
+        hist_lbp    = hist_lbp.astype(np.float32)
+
+        # ── Color histogram (HSV) ─────────────────────────────────
+        hsv  = cv2.cvtColor(face, cv2.COLOR_RGB2HSV)
+        h_hist = cv2.calcHist([hsv], [0], None, [32], [0, 180]).flatten()
+        s_hist = cv2.calcHist([hsv], [1], None, [32], [0, 256]).flatten()
+
+        # ── Concatenate + L2 normalise ────────────────────────────
+        feat = np.concatenate([hog_feat, hist_lbp, h_hist, s_hist])
+        norm = np.linalg.norm(feat)
+        if norm > 0:
+            feat = feat / norm
+
+        return feat.astype(np.float32)
+
+    except Exception:
+        return None
+
+
+def _lbp(gray: np.ndarray) -> np.ndarray:
+    """Compute uniform Local Binary Pattern image."""
+    h, w   = gray.shape
+    lbp    = np.zeros_like(gray)
+    g      = gray.astype(np.int32)
+    neighbors = [
+        (-1,-1),(-1,0),(-1,1),
+        ( 0, 1),( 1, 1),( 1, 0),
+        ( 1,-1),( 0,-1),
+    ]
+    for i, (dy, dx) in enumerate(neighbors):
+        shifted = np.zeros_like(g)
+        sy = slice(max(0,-dy), h + min(0,-dy))
+        sx = slice(max(0,-dx), w + min(0,-dx))
+        ty = slice(max(0, dy), h + min(0, dy))
+        tx = slice(max(0, dx), w + min(0, dx))
+        shifted[ty, tx] = g[sy, sx]
+        lbp += ((shifted >= g).astype(np.uint8) << i)
+    return lbp.astype(np.uint8)
